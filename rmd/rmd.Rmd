@@ -1,0 +1,129 @@
+---
+title: ""
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    code_folding: show
+---
+
+
+```{r setup, echo=FALSE, cache=FALSE, include=FALSE}
+library(knitr)
+library(rmdformats)
+library(tidyverse)
+library(kableExtra)
+
+#Bio libraries
+library(GenomicAlignments)
+library(DESeq2)
+
+## Global options
+options(max.print = "75")
+opts_chunk$set(cache = TRUE,
+               prompt = FALSE,
+               comment = NA,
+               message = FALSE,
+               warning = FALSE)
+opts_knit$set(width = 75)
+
+if (interactive()) {
+  warning('Developing Mode on!')
+  setwd('/home/zsigmas/UOC/PEC2_analisis_omicos/rmd')
+  # Kable fails when using caption inside IntelliJ
+  kable <- function(...) { try(kable(...), silent = T) }
+}
+
+lmft <- ggthemes::theme_tufte(base_family = 'sans', base_size = 14)
+
+```
+
+# Selección aleatoria de los datos
+
+Seleccionamos diez muestras por grupo.
+
+```{r sample_selection}
+
+# Only select and save the samples once, and set the sample seed just in case we have to resamples the same population
+set.seed(28052020)
+selected_data_file <- 'selected_data.Rdata'
+
+if (!file.exists(selected_data_file)) {
+  targets <- read_csv('../data/targets.csv') %>%
+    group_by(Group) %>%
+    sample_n(10) %>%
+    arrange(Group) %>%
+    mutate(rn = Sample_Name) %>%
+    column_to_rownames('rn')
+
+  counts <- read_delim('../data/counts.csv', delim = ';') %>%
+    select(X1, rownames(targets)) %>%
+    column_to_rownames('X1') %>%
+    as.matrix()
+
+  save(targets, counts, file = selected_data_file)
+}else { load(selected_data_file) }
+
+janitor::tabyl(targets, Group) %>% kable(caption = 'Número de muestras por grupo')
+targets %>% kable(caption = 'Muestras seleccionadas')
+```
+
+En este punto tenemos cargados el conteo por gen y muestra.
+
+# SummarizedExperiment
+
+Vamos a crear un SummarizedExperiment de estos datos
+```{r to_se}
+se <- SummarizedExperiment(counts, colData = targets)
+# We transform it into an ordered factor with reference level NTI
+se$Group <- factor(se$Group, levels = c('NIT', 'SFI', 'ELI'))
+se
+
+```
+# DSeq analysis
+
+Ya tenemos preparado nuestro SummarizedExperiment, vamos ahora a analizarlo utilizando DESeq2
+```{r to_deseq}
+dds <- DESeqDataSet(se, design = ~Group)
+```
+## Filtrado
+
+Vamos a hacer un filtrado muy sencillo de los datos.
+
+- Eliminaremos los genes cuyos conteos sean cero
+
+Vamos a observar de todas maneras un histograma del conteo por cada gen, después de quitar los ceros para ver su aspecto.
+
+```{r hist_count_by_gen}
+gen_sum = tibble(count = rowSums(counts(dds))) %>% tidylog::filter(count > 10)
+ggplot(gen_sum, aes(x = log10(count))) +
+  geom_histogram(color = 'black', alpha = 0, binwidth = 1, boundary = 0) +
+  stat_bin(binwidth=1, boundary = 0, geom="text", colour="black", size=10,
+           aes(label=..count.., y=..count../2)) +
+  scale_x_continuous(breaks = 0:max(log10(gen_sum[['count']])),
+                     limits = c(0, max(log10(gen_sum[['count']])))) +
+  labs(title = 'Histograma de conteos por histograma (log10)',
+       x = 'Conteo por gen (log10)',
+       y = 'Cantidad') +
+  lmft
+```
+
+Parece curioso que haya tantos genes con una expresión entre 10 y 100, para 30 muestras totales parecen números muy bajos. Sería interesante considerar si deberíamos incluirlos o no.
+
+# Análisis de expresión diferencial
+
+```{r analysing}
+dds <- DESeq(dds, parallel = T)
+```
+
+```{r results}
+dds$Group
+results(dds, name='Group_SFI_vs_NIT')
+results(dds, contrast = c('Group', 'NIT', 'SFI'))
+resultsNames(dds)
+
+```
+
+```{r}
+
+```
