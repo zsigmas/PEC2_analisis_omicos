@@ -13,10 +13,18 @@ library(knitr)
 library(rmdformats)
 library(tidyverse)
 library(kableExtra)
+library(captioner)
+library(plotly)
 
 #Bio libraries
 library(GenomicAlignments)
 library(DESeq2)
+
+#Captioner
+
+table_nums <- captioner(prefix = 'Tabla')
+fig_nums <- captioner(prefix = 'Figura')
+out_nums <- captioner(prefix = 'Salida')
 
 ## Global options
 options(max.print = "75")
@@ -35,6 +43,46 @@ if (interactive()) {
 }
 
 lmft <- ggthemes::theme_tufte(base_family = 'sans', base_size = 14)
+
+```
+```{r auxiliary_functions}
+
+my_volcano <- function(df, alpha = .05, lim_fold = 1, title = '') {
+
+  df <- df %>%
+    tidylog::drop_na() %>%
+    mutate(sig_p = pvalue < alpha, sig_adj_p = padj < alpha) %>%
+    tidylog::drop_na()
+
+  unadj_p <- ggplot(df, aes(x = log2FoldChange, y = -log10(pvalue), color = sig_p)) +
+    geom_point() +
+    geom_hline(yintercept = -log10(alpha), linetype = 2) +
+    geom_vline(xintercept = lim_fold) +
+    geom_vline(xintercept = -lim_fold) +
+    labs(x = 'LogFold',
+         y = '-log10(p)',
+         title = paste(title, 'Sin corregir por FDR'),
+         color = paste0('p<', alpha)) +
+    facet_wrap(. ~ contrast) +
+    theme(legend.position = 'none') +
+    lmft
+
+  adj_p <- ggplot(df, aes(x = log2FoldChange, y = -log10(padj), color = sig_adj_p)) +
+    geom_point() +
+    ggthemes::theme_tufte(base_family = 'sans') +
+    geom_hline(yintercept = -log10(alpha), linetype = 2) +
+    geom_vline(xintercept = lim_fold) +
+    geom_vline(xintercept = -lim_fold) +
+    labs(x = 'LogFold',
+         y = '-log10(p_adj)',
+         color = paste0('p<', alpha),
+         title = paste(title, 'Corregido por FDR p-value')
+    ) +
+    facet_wrap(. ~ contrast) +
+    lmft
+
+  return(list(unadj_plot = unadj_p, adj_plot = adj_p))
+}
 
 ```
 
@@ -64,22 +112,35 @@ if (!file.exists(selected_data_file)) {
   save(targets, counts, file = selected_data_file)
 }else { load(selected_data_file) }
 
-janitor::tabyl(targets, Group) %>% kable(caption = 'Número de muestras por grupo')
-targets %>% kable(caption = 'Muestras seleccionadas')
+janitor::tabyl(targets, Group) %>% kable()
+table_nums(name = 'sample_group', caption = 'Muestras por grupo', display = F)
 ```
+
+`r table_nums('sample_group')`
+
+```{r}
+targets %>% kable()
+table_nums(name = 'sample_sel', caption = 'Muestras seleccionadas', display = F)
+```
+
+`r table_nums('sample_sel')`
+
 
 En este punto tenemos cargados el conteo por gen y muestra.
 
 # SummarizedExperiment
 
-Vamos a crear un SummarizedExperiment de estos datos
+Vamos a crear un SummarizedExperiment de estos datos. Con las columna grupo como factor, siendo el primero de ellos NIT que utilizaremos como control.
 ```{r to_se}
 se <- SummarizedExperiment(counts, colData = targets)
 # We transform it into an ordered factor with reference level NTI
 se$Group <- factor(se$Group, levels = c('NIT', 'SFI', 'ELI'))
+out_nums(name = 'se_output', caption = 'Summarized Experiment', display = F)
 se
-
 ```
+`r out_nums('se_output')`
+
+
 # DSeq analysis
 
 Ya tenemos preparado nuestro SummarizedExperiment, vamos ahora a analizarlo utilizando DESeq2
@@ -90,40 +151,106 @@ dds <- DESeqDataSet(se, design = ~Group)
 
 Vamos a hacer un filtrado muy sencillo de los datos.
 
-- Eliminaremos los genes cuyos conteos sean cero
+- Nos quedaremos solo con los genes cuyos conteos sean mayores que 1
 
 Vamos a observar de todas maneras un histograma del conteo por cada gen, después de quitar los ceros para ver su aspecto.
 
 ```{r hist_count_by_gen}
-gen_sum = tibble(count = rowSums(counts(dds))) %>% tidylog::filter(count > 10)
+gen_sum <- tibble(count = rowSums(counts(dds))) %>% tidylog::filter(count > 1)
 ggplot(gen_sum, aes(x = log10(count))) +
   geom_histogram(color = 'black', alpha = 0, binwidth = 1, boundary = 0) +
-  stat_bin(binwidth=1, boundary = 0, geom="text", colour="black", size=10,
-           aes(label=..count.., y=..count../2)) +
+  stat_bin(binwidth = 1, boundary = 0, geom = "text", colour = "black", size = 8,
+           aes(label = ..count.., y = ..count.. / 2)) +
   scale_x_continuous(breaks = 0:max(log10(gen_sum[['count']])),
                      limits = c(0, max(log10(gen_sum[['count']])))) +
-  labs(title = 'Histograma de conteos por histograma (log10)',
-       x = 'Conteo por gen (log10)',
+  labs(x = 'Conteo por gen (log10)',
        y = 'Cantidad') +
   lmft
+fig_nums(name = 'hist_cont_filt', caption = 'Histograma de conteos por histograma (log10)', display = F)
 ```
 
-Parece curioso que haya tantos genes con una expresión entre 10 y 100, para 30 muestras totales parecen números muy bajos. Sería interesante considerar si deberíamos incluirlos o no.
+`r fig_nums('hist_cont_filt')`
 
-# Análisis de expresión diferencial
+Parece curioso que haya tantos genes con una expresión menor a 100, para 30 muestras totales parecen números muy bajos. Sería interesante considerar si deberíamos incluirlos o no. Por ahora no dispongo de un criterio mejor o sea que utilizaré el mismo criterio que en los apuntes. Sin embargo, no parece que esto vaya a ser un problema en DSeq ya que tiene en cuenta los low counts.
 
-```{r analysing}
-dds <- DESeq(dds, parallel = T)
+# Análisis de expresión diferencial (DSeq)
+
+En este caso disponemos de tres condiciones:
+
+- NTI: *Non-Infiltrated Tissues*
+- SFI: *Small Focal Infiltrates*
+- ELI: *Extensive Lymphoid Infiltrates*
+
+Vamos a aplicar varios enfoques en este caso:
+
+En primer lugar compararemos las dos condiciones experimentales (SFI y ELI) contra la condición control (NTI) y luego compararemos las condiciones experimentales entre ellas.
+
+Como análisis adicional vamos a comprobar si existe un efecto general de tratamiento comparando el modelo con el término *Group* y el modelo con el Intercept únicamente.
+
+En todo los casos utilizaremos como corte de significación p<.05 y en los casos de FDR un 5%. En otro caso se indicará explicitamente.
+
+## Análisis por pares
+
+Para el caso de las diferencias por pares utilizamos DESeq
+
+```{r analysing, cache=TRUE}
+dds <- DESeq(dds, parallel = T,)
 ```
 
-```{r results}
-dds$Group
-results(dds, name='Group_SFI_vs_NIT')
-results(dds, contrast = c('Group', 'NIT', 'SFI'))
-resultsNames(dds)
+Extraemos los resultados para cada contraste de interés y luego los plotearemos uno por uno. También vamos a calcular los resultados con un *shrinkage* de el fold que nos ayudará a corregir la variabilidad en los casos en el que conteo sea muy bajo o muy variable y podremos ordenar mejor los resultados. En cualquier caso la significación se extraerá de los resultados sin *shrinkage*.
 
+En el caso de los contrastes contra el nivel de referencia utilizaremos *apeglm* para el *shrinkage* y *ashr*, para el caso del ELI y SFI.
+
+```{r results_pairwise, cache = T}
+rs_SFI_NIT <- results(dds, name = 'Group_SFI_vs_NIT', alpha = .05)
+rs_ELI_NIT <- results(dds, name = 'Group_ELI_vs_NIT', alpha = .05)
+rs_SFI_ELI <- results(dds, contrast = c('Group', 'SFI', 'ELI'), alpha = .05)
+
+rs_SFI_NIT_LFC <- lfcShrink(dds, coef = 'Group_SFI_vs_NIT', type = 'apeglm')
+rs_ELI_NIT_LFC <- lfcShrink(dds, coef = 'Group_ELI_vs_NIT', type = 'apeglm')
+rs_SFI_ELI_LFC <- lfcShrink(dds, contrast = c('Group', 'SFI', 'ELI'), alpha = .05, type = 'ashr')
+
+rs <- bind_rows(mutate(as_tibble(rs_SFI_NIT, rownames = 'gene'), contrast = 'Group_SFI_vs_NIT'),
+                mutate(as_tibble(rs_ELI_NIT, rownames = 'gene'), contrast = 'Group_ELI_vs_NIT'),
+                mutate(as_tibble(rs_SFI_ELI, rownames = 'gene'), contrast = 'Group_SFI_vs_ELI'))
+
+rs_LFC <- bind_rows(mutate(as_tibble(rs_SFI_NIT_LFC, rownames = 'gene'), contrast = 'Group_SFI_vs_NIT'),
+                    mutate(as_tibble(rs_ELI_NIT_LFC, rownames = 'gene'), contrast = 'Group_ELI_vs_NIT'),
+                    mutate(as_tibble(rs_SFI_ELI_LFC, rownames = 'gene'), contrast = 'Group_SFI_vs_ELI'))
+
+#resultsNames(dds) # Obtain the names of the results comparisons
+#mcols(rs_SFI_NIT_LFC)
 ```
+### SFI vs. NIT
 
-```{r}
+#### Sumario
 
+Aquí podemos ver los genes que se han regulado positiva o negativamente y los genes cuya cuenta era muy baja.
+
+```{r sum_SFI_NIT}
+out_nums(name = 'sum_SFI_NIT', caption = 'Sumario SFI vs. NTI', display = F)
+```
+`r out_nums('sum_SFI_NIT')`
+
+
+```{r plot_SIF_NIT, fig.width = 8, fig.height = 4, warning = F}
+
+cowplot::plot_grid(plotlist = my_volcano(df = rs, alpha = .05, lim_fold = 2, title = 'Sin LFC'), nrow = 2)
+
+cowplot::plot_grid(plotlist = my_volcano(df = rs_LFC, alpha = .05, lim_fold = 2, title = 'Con LFC'), nrow = 2)
+
+fig_nums(name = 'plot_SFI_NIT', caption = 'Volcano SFI vs. NTI con y sin LFC', display = F)
+```
+`r fig_nums('plot_SFI_NIT')`
+La línea horizontal indica el límite de significación para un 5%, las líneas verticales un fold de 2, los colores indican si un gen ha resultado significativo o no.
+
+Como vemos en el caso sin *shinkrage* aparecen multitud de genes con un fold muy elevado, sin embargo al aplicarlo el número se reduce drásticamente, probablemente sea indicativo de que hay muchos genes con variabilidad elevada.
+
+
+
+```{r plot_SIF_NIT, fig.width = 8, fig.height = 4}
+
+cowplot::plot_grid(plotlist = my_volcano(gene_names = rownames(rs_SFI_NIT), logFold = rs_SFI_NIT$log2FoldChange, p = rs_SFI_NIT$pvalue, adj_p = rs_SFI_NIT$padj, alpha = .05, lim_fold = 1))
+
+fig_nums(name = 'plot_SFI_NIT', caption = 'Volcano SFI vs. NTI', display = F)
 ```
