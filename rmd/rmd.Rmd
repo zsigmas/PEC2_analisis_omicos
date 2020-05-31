@@ -15,10 +15,12 @@ library(tidyverse)
 library(kableExtra)
 library(captioner)
 library(plotly)
+library(DT)
 
 #Bio libraries
 library(GenomicAlignments)
 library(DESeq2)
+library(vsn)
 
 #Captioner
 
@@ -84,6 +86,9 @@ my_volcano <- function(df, alpha = .05, lim_fold = 1, title = '') {
   return(list(unadj_plot = unadj_p, adj_plot = adj_p))
 }
 
+filter_lc <- function(mat, threshold = 1) {
+  mat[rowSums(mat) > threshold,]
+}
 ```
 
 # Selección aleatoria de los datos
@@ -128,52 +133,250 @@ table_nums(name = 'sample_sel', caption = 'Muestras seleccionadas', display = F)
 
 En este punto tenemos cargados el conteo por gen y muestra.
 
-# SummarizedExperiment
+# Filtrado inicial
 
-Vamos a crear un SummarizedExperiment de estos datos. Con las columna grupo como factor, siendo el primero de ellos NIT que utilizaremos como control.
-```{r to_se}
-se <- SummarizedExperiment(counts, colData = targets)
-# We transform it into an ordered factor with reference level NTI
-se$Group <- factor(se$Group, levels = c('NIT', 'SFI', 'ELI'))
-out_nums(name = 'se_output', caption = 'Summarized Experiment', display = F)
-se
-```
-`r out_nums('se_output')`
+Antes de comenzar a explorar los datos vamos a eliminar los conteos muy bajos, esto aligerará la computación y eliminará ruido de los datos.
 
+```{r init_filt}
 
-# DSeq analysis
+counts <- filter_lc(counts, 10)
 
-Ya tenemos preparado nuestro SummarizedExperiment, vamos ahora a analizarlo utilizando DESeq2
-```{r to_deseq}
-dds <- DESeqDataSet(se, design = ~Group)
-```
-## Filtrado
-
-Vamos a hacer un filtrado muy sencillo de los datos.
-
-- Nos quedaremos solo con los genes cuyos conteos sean mayores que 1
-
-Vamos a observar de todas maneras un histograma del conteo por cada gen, después de quitar los ceros para ver su aspecto.
-
-```{r hist_count_by_gen}
-gen_sum <- tibble(count = rowSums(counts(dds))) %>% tidylog::filter(count > 1)
-ggplot(gen_sum, aes(x = log10(count))) +
-  geom_histogram(color = 'black', alpha = 0, binwidth = 1, boundary = 0) +
-  stat_bin(binwidth = 1, boundary = 0, geom = "text", colour = "black", size = 8,
-           aes(label = ..count.., y = ..count.. / 2)) +
-  scale_x_continuous(breaks = 0:max(log10(gen_sum[['count']])),
-                     limits = c(0, max(log10(gen_sum[['count']])))) +
-  labs(x = 'Conteo por gen (log10)',
-       y = 'Cantidad') +
-  lmft
-fig_nums(name = 'hist_cont_filt', caption = 'Histograma de conteos por histograma (log10)', display = F)
 ```
 
-`r fig_nums('hist_cont_filt')`
+# Control de calidad y exploración
 
-Parece curioso que haya tantos genes con una expresión menor a 100, para 30 muestras totales parecen números muy bajos. Sería interesante considerar si deberíamos incluirlos o no. Por ahora no dispongo de un criterio mejor o sea que utilizaré el mismo criterio que en los apuntes. Sin embargo, no parece que esto vaya a ser un problema en DSeq ya que tiene en cuenta los low counts.
+En primer lugar vamos a cambiar la matriz de conteos y vamos a transformarle en formato largo, deberíamos de ser precavidos ya que esto funcionará bien en un dataset pequeño pero en dataset más grandes podría dar problemas.
 
+```{r count_long}
+counts_long <- counts %>%
+  as_tibble() %>%
+  rownames_to_column(var = 'gene_id') %>%
+  pivot_longer(-gene_id, names_to = 'Sample_Name', values_to = 'count') %>%
+  inner_join(select(targets, Sample_Name, Group), by = 'Sample_Name') %>%
+  mutate(Group = factor(Group, levels = c('NIT', 'SFI', 'ELI'))) %>%
+  arrange(Group)
+```
+
+## Distribución de conteos por muestras y grupos.
+
+En primer lugar vamos a comprobar la distribución de conteos por muestra y grupo, primero en forma de histograma y luego de boxplot.
+
+```{r count_hist_per_sample, fig.height = 8}
+cowplot::plot_grid(
+  ggplot(counts_long, aes(x = log10(count + 1), color = Sample_Name, group = Sample_Name)) +
+    geom_density(alpha = .2) +
+    lmft +
+    theme(legend.position = 'None') +
+    labs(title = 'Conteo por muestra'),
+  ggplot(counts_long, aes(x = log10(count + 1), color = Sample_Name, group = Sample_Name)) +
+    geom_density(alpha = .2) +
+    facet_wrap(. ~ Group) +
+    lmft +
+    theme(legend.position = 'None') +
+    labs(title = 'Conteo por grupos'),
+  nrow = 2
+)
+```
+
+```{r count_boxplot_per_sample}
+ggplot(counts_long, aes(y = log2(count + 1), x = glue::glue('{Group}_{Sample_Name}'), fill = Group, Group = Group)) +
+  geom_boxplot(alpha = .2) +
+  lmft +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = 'Conteo por muestra', x = 'Muestra')
+```
+
+Vamos ahora a controlar el conteo total por cada muestra
+
+```{r sample_count}
+ggplot(counts_long %>%
+         mutate(Sample_Name = glue::glue('{Group}_{Sample_Name}')) %>%
+         group_by(Sample_Name) %>%
+         summarise(count = sum(count)),
+       aes(x = Sample_Name, y = (count / 1e6))) +
+  geom_bar(stat = 'identity', alpha = 0, color = 'black') +
+  lmft +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+Parece que tenemos una muestra del grupo ELI que está ligeramente desplazada respecto de las otras muestras y además tiene muchas menos medidas. En concreto es la muestra que termina en 2TC6J.
+
+Como no tenemos acceso a los datos iniciales no podemos comprobar cual ha sido el fallo en la muestra, por tanto lo que vamos a hacer es eliminarla y obtener una muestra nueva de nuestra base de datos.
+
+```{r remove_and_replace}
+
+# Remove wrong sample
+wrong_sample <- targets[str_detect(targets[['Sample_Name']], '2TC6J'), 'Sample_Name']
+targets <- targets[!str_detect(targets[['Sample_Name']], '2TC6J'),]
+
+# Replace sample
+new_sample <- read_csv('../data/targets.csv') %>%
+  filter(Group == 'ELI', Sample_Name != wrong_sample, !(Sample_Name %in% targets[['Sample_Name']])) %>%
+  sample_n(1)
+
+targets <- bind_rows(targets, new_sample) %>%
+  mutate(rn = Sample_Name) %>%
+  column_to_rownames('rn')
+
+# Recreate counts
+counts <- read_delim('../data/counts.csv', delim = ';') %>%
+  select(X1, rownames(targets)) %>%
+  column_to_rownames('X1') %>%
+  as.matrix()
+
+# Refilter
+counts <- filter_lc(counts, 1)
+
+```
+
+Vamos a volver a hacer el control de calidad con histogramas
+
+```{r count_long_replaced}
+counts_long <- counts %>%
+  as_tibble() %>%
+  rownames_to_column(var = 'gene_id') %>%
+  pivot_longer(-gene_id, names_to = 'Sample_Name', values_to = 'count') %>%
+  inner_join(select(targets, Sample_Name, Group), by = 'Sample_Name') %>%
+  mutate(Group = factor(Group, levels = c('NIT', 'SFI', 'ELI'))) %>%
+  arrange(Group)
+```
+
+```{r count_hist_per_sample_replaced}
+cowplot::plot_grid(
+  ggplot(counts_long, aes(x = log10(count + 1), color = Sample_Name, group = Sample_Name)) +
+    geom_density(alpha = .2) +
+    lmft +
+    theme(legend.position = 'None') +
+    labs(title = 'Conteo por muestra'),
+  ggplot(counts_long, aes(x = log10(count + 1), color = Sample_Name, group = Sample_Name)) +
+    geom_density(alpha = .2) +
+    facet_wrap(. ~ Group) +
+    lmft +
+    theme(legend.position = 'None') +
+    labs(title = 'Conteo por grupos'),
+  nrow = 1
+)
+```
+
+```{r count_boxplot_per_sample_replaced}
+ggplot(counts_long, aes(y = log2(count + 1), x = glue::glue('{Group}_{Sample_Name}'), fill = Group, Group = Group)) +
+  geom_boxplot(alpha = .2) +
+  lmft +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = 'Conteo por muestra', x = 'Muestra')
+```
+```{r sample_count_replaced}
+ggplot(counts_long %>%
+         mutate(Sample_Name = glue::glue('{Group}_{Sample_Name}')) %>%
+         group_by(Sample_Name) %>%
+         summarise(count = sum(count)),
+       aes(x = Sample_Name, y = (count / 1e6))) +
+  geom_bar(stat = 'identity', alpha = 0, color = 'black') +
+  lmft +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+Ahora las muestras parecen correctas.
+
+## DSeqDataset
+
+Llegado a este punto vamos a transformar el set de datos un *DSeqDataset*. Antes de realizar este paso vamos a transformar los campos de interés para el análisis estadístico posterior en factores cuyo primer miembro será el nivel de referencia *NIT*.
+
+```{r to_dseq}
+targets[['Group']] <- factor(targets[['Group']], levels = c('NIT', 'SFI', 'ELI'))
+dds <- DESeqDataSetFromMatrix(countData = counts, colData = targets, design = ~Group)
+```
+
+## Transformación
+
+Algunos de los métodos de exploración que vamos a utilizar funcionan mejor bajo condiciones de homocedasticidad, varianza igual. Sin embargo esto no es completamente cierto para nuestros datos ya que la varianza aumenta en función del conteo por gen, es decir los genes con mayor conteo tendrán mayor variabilidad.
+
+Vamos a comprobarlo en nuestros datos
+
+```{r check_hetero}
+ggplot(counts_long %>%
+         group_by(gene_id) %>%
+         summarise(sd_gene = sd(count), rank_gene = mean(count)) %>%
+         mutate(rank_gene = row_number(rank_gene))
+  , aes(x = rank_gene, y = sd_gene)) +
+  geom_point() +
+  ylim(0, 2^10)
+
+```
+*Nota*: El gráfico está cortado en su parte superior.
+
+Como vemos la variabilidad aumenta con la media.
+
+Vamos por tanto a transformar nuestros datos, como son pocas muestras utilizaremos * variance stabilizing transformation* o *vst*. Con la opción *blind* que evitará que en el computo de la transformación influya la varianza debida a las condiciones experimentales.
+
+```{r vst}
+vsd <- vst(dds, blind = F)
+```
+
+Vamos a comprobar que hemos arreglado este problema y la variabilidad de los datos no depende, o lo hace menos de la media.
+
+```{r vst_check_hetero}
+ggplot(assay(vsd) %>%
+         as_tibble(rownames = 'gene_id') %>%
+         pivot_longer(-gene_id, values_to = 'count', names_to = 'Sample_Name') %>%
+         group_by(gene_id) %>%
+         summarise(sd_gene = sd(count), rank_gene = mean(count)) %>%
+         mutate(rank_gene = row_number(rank_gene))
+  , aes(x = rank_gene, y = sd_gene)) +
+  geom_point()
+```
+Como vemos aunque no es completamente perfecto la variabilidad se ha reducido considerablemente. Vamos ahora a a explorar los datos.
+
+## Distancia entre muestras
+
+```{r pair_dist}
+sampleDists <- dist(t(assay(vsd)))
+library("pheatmap")
+library("RColorBrewer")
+
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- vsd$Group
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+El agrupamiento es más fuerte entre las muestras del grupo *ELI* mientras que el resto no parecen agruparse particularmente bien.
+
+## PCA
+
+```{r pca}
+plotPCA(vsd, intgroup = c('Group'))
+```
+En el caso del PCA parece más prometedor, existe una diferencia clara entre condiciones en el eje X y además la cantidad de varianza explicada por ese factor es elevada, un 59%.
+
+## MDS
+
+```{r}
+mds <- as.data.frame(colData(vsd)) %>%
+  cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = Group)) +
+  geom_point(size = 3) +
+  coord_fixed()
+```
+Como en el caso de las distancias parece que el grupo *ELI* se diferencia claramente de los otros mientras que *SFI* y *NIT* se mezclan más.
+
+## Conclusiones
+
+Parece que los datos son correctos y la exploración de los datos también indica que podemos proceder con el análisis de expresión diferencial.
+
+```{r}
+
+```
 # Análisis de expresión diferencial (DSeq)
+
+Como vamos a aplicar DSeq no es necesario aplicar ninguna tipo de transformación por lo tanto trabajaremos directemente sobre los conteos, en el objedto *DSeqDataset* que hemos creado en el apartado anterior.
 
 En este caso disponemos de tres condiciones:
 
@@ -185,55 +388,62 @@ Vamos a aplicar varios enfoques en este caso:
 
 En primer lugar compararemos las dos condiciones experimentales (SFI y ELI) contra la condición control (NTI) y luego compararemos las condiciones experimentales entre ellas.
 
-Como análisis adicional vamos a comprobar si existe un efecto general de tratamiento comparando el modelo con el término *Group* y el modelo con el Intercept únicamente.
 
-En todo los casos utilizaremos como corte de significación p<.05 y en los casos de FDR un 5%. En otro caso se indicará explicitamente.
+En todo los casos utilizaremos como corte de significación p<.05 y en los casos de FDR un 5%. En otro caso se indicará explícitamente.
 
 ## Análisis por pares
 
 Para el caso de las diferencias por pares utilizamos DESeq
 
 ```{r analysing, cache=TRUE}
-dds <- DESeq(dds, parallel = T,)
+dds_pair_file <- 'dds_pair.RData'
+if (!file.exists(dds_pair_file)) {
+  dds_pair <- DESeq(dds, parallel = T)
+  save(dds_pair, file = dds_pair_file) }else {
+  load(dds_pair_file)
+}
 ```
 
-Extraemos los resultados para cada contraste de interés y luego los plotearemos uno por uno. También vamos a calcular los resultados con un *shrinkage* de el fold que nos ayudará a corregir la variabilidad en los casos en el que conteo sea muy bajo o muy variable y podremos ordenar mejor los resultados. En cualquier caso la significación se extraerá de los resultados sin *shrinkage*.
+Extraemos los resultados para cada contraste de interés y luego los plotearemos uno por uno. También vamos a calcular los resultados con un *shrinkage* de el fold que nos ayudará a corregir la variabilidad en los casos en el que conteo sea muy bajo o muy variable y podremos ordenar mejor los resultados.
 
 En el caso de los contrastes contra el nivel de referencia utilizaremos *apeglm* para el *shrinkage* y *ashr*, para el caso del ELI y SFI.
 
 ```{r results_pairwise, cache = T}
-rs_SFI_NIT <- results(dds, name = 'Group_SFI_vs_NIT', alpha = .05)
-rs_ELI_NIT <- results(dds, name = 'Group_ELI_vs_NIT', alpha = .05)
-rs_SFI_ELI <- results(dds, contrast = c('Group', 'SFI', 'ELI'), alpha = .05)
 
-rs_SFI_NIT_LFC <- lfcShrink(dds, coef = 'Group_SFI_vs_NIT', type = 'apeglm')
-rs_ELI_NIT_LFC <- lfcShrink(dds, coef = 'Group_ELI_vs_NIT', type = 'apeglm')
-rs_SFI_ELI_LFC <- lfcShrink(dds, contrast = c('Group', 'SFI', 'ELI'), alpha = .05, type = 'ashr')
+rs_dds_pair_file <- 'rs_dds_pair.RData'
+if (!file.exists(rs_dds_pair_file)) {
+  rs_SFI_NIT <- results(dds_pair, name = 'Group_SFI_vs_NIT', alpha = .05)
+  rs_ELI_NIT <- results(dds_pair, name = 'Group_ELI_vs_NIT', alpha = .05)
+  rs_SFI_ELI <- results(dds_pair, contrast = c('Group', 'SFI', 'ELI'), alpha = .05)
 
-rs <- bind_rows(mutate(as_tibble(rs_SFI_NIT, rownames = 'gene'), contrast = 'Group_SFI_vs_NIT'),
-                mutate(as_tibble(rs_ELI_NIT, rownames = 'gene'), contrast = 'Group_ELI_vs_NIT'),
-                mutate(as_tibble(rs_SFI_ELI, rownames = 'gene'), contrast = 'Group_SFI_vs_ELI'))
+  rs_SFI_NIT_LFC <- lfcShrink(dds_pair, coef = 'Group_SFI_vs_NIT', type = 'apeglm')
+  rs_ELI_NIT_LFC <- lfcShrink(dds_pair, coef = 'Group_ELI_vs_NIT', type = 'apeglm')
+  rs_SFI_ELI_LFC <- lfcShrink(dds_pair, contrast = c('Group', 'SFI', 'ELI'), alpha = .05, type = 'ashr')
 
-rs_LFC <- bind_rows(mutate(as_tibble(rs_SFI_NIT_LFC, rownames = 'gene'), contrast = 'Group_SFI_vs_NIT'),
-                    mutate(as_tibble(rs_ELI_NIT_LFC, rownames = 'gene'), contrast = 'Group_ELI_vs_NIT'),
-                    mutate(as_tibble(rs_SFI_ELI_LFC, rownames = 'gene'), contrast = 'Group_SFI_vs_ELI'))
+  rs <- bind_rows(mutate(as_tibble(rs_SFI_NIT, rownames = 'gene'), contrast = 'Group_SFI_vs_NIT'),
+                  mutate(as_tibble(rs_ELI_NIT, rownames = 'gene'), contrast = 'Group_ELI_vs_NIT'),
+                  mutate(as_tibble(rs_SFI_ELI, rownames = 'gene'), contrast = 'Group_SFI_vs_ELI'))
+
+  rs_LFC <- bind_rows(mutate(as_tibble(rs_SFI_NIT_LFC, rownames = 'gene'), contrast = 'Group_SFI_vs_NIT'),
+                      mutate(as_tibble(rs_ELI_NIT_LFC, rownames = 'gene'), contrast = 'Group_ELI_vs_NIT'),
+                      mutate(as_tibble(rs_SFI_ELI_LFC, rownames = 'gene'), contrast = 'Group_SFI_vs_ELI'))
+  save(rs_SFI_NIT, rs_ELI_NIT, rs_SFI_ELI,
+       rs_SFI_NIT_LFC, rs_ELI_NIT_LFC, rs_SFI_ELI_LFC,
+       rs, rs_LFC,
+       file = rs_dds_pair_file) }else {
+  load(rs_dds_pair_file)
+}
+
+#TODO Justificar Shrinkage
 
 #resultsNames(dds) # Obtain the names of the results comparisons
 #mcols(rs_SFI_NIT_LFC)
 ```
-### SFI vs. NIT
 
-#### Sumario
+Hemos calculado también los resultados con *log fold shrinkage* para observar como determinados genes con grandes cambios en el *log fold* van asociados a bajos conteos y alta variabilidad. *LFCShrink* penaliza estos genes reduciendo su *log fold*.
 
-Aquí podemos ver los genes que se han regulado positiva o negativamente y los genes cuya cuenta era muy baja.
-
-```{r sum_SFI_NIT}
-out_nums(name = 'sum_SFI_NIT', caption = 'Sumario SFI vs. NTI', display = F)
-```
-`r out_nums('sum_SFI_NIT')`
-
-
-```{r plot_SIF_NIT, fig.width = 8, fig.height = 4, warning = F}
+## Volcano plot
+```{r plot_SIF_NIT, fig.width = 8, fig.height = 8, warning = F}
 
 cowplot::plot_grid(plotlist = my_volcano(df = rs, alpha = .05, lim_fold = 2, title = 'Sin LFC'), nrow = 2)
 
@@ -244,13 +454,48 @@ fig_nums(name = 'plot_SFI_NIT', caption = 'Volcano SFI vs. NTI con y sin LFC', d
 `r fig_nums('plot_SFI_NIT')`
 La línea horizontal indica el límite de significación para un 5%, las líneas verticales un fold de 2, los colores indican si un gen ha resultado significativo o no.
 
-Como vemos en el caso sin *shinkrage* aparecen multitud de genes con un fold muy elevado, sin embargo al aplicarlo el número se reduce drásticamente, probablemente sea indicativo de que hay muchos genes con variabilidad elevada.
+Como vemos en el caso sin *shrinkage* aparecen multitud de genes con un fold muy elevado, sin embargo al aplicar *LFC* el número se reduce drásticamente, probablemente sea indicativo de abundantes genes con variabilidad elevada. La única comparación que no sale fuertemente penalizada es *SFI vs. ELI*.
+
+Dada esta diferencia utilizaremos la tabla con *shrinkage* para intepretar los resultados.
 
 
+## Tablas de resultados
 
-```{r plot_SIF_NIT, fig.width = 8, fig.height = 4}
+Vamos a presentar los resultados en tablas que son ordenables y filtrables para cada uno de los contrastes por separado. Hemos eliminado las columnas *NA* de los resultados. Los datos de cada contraste se dividen en Log Fold Positivo y Negativo.
 
-cowplot::plot_grid(plotlist = my_volcano(gene_names = rownames(rs_SFI_NIT), logFold = rs_SFI_NIT$log2FoldChange, p = rs_SFI_NIT$pvalue, adj_p = rs_SFI_NIT$padj, alpha = .05, lim_fold = 1))
+### Tabla SFI vs. NIT
 
-fig_nums(name = 'plot_SFI_NIT', caption = 'Volcano SFI vs. NTI', display = F)
+```{r SFI_NIT_table}
+rs_SFI_NIT_LFC %>%
+  as_tibble(rownames = 'gene_id') %>%
+  filter(log2FoldChange > 0) %>%
+  drop_na() %>%
+  sample_n(100) %>%
+  mutate_if(is.numeric, function(x) { signif(x, digits = 3) }) %>%
+  datatable(caption = 'Log Fold Positivo')
+
+rs_SFI_NIT_LFC %>%
+  as_tibble(rownames = 'gene_id') %>%
+  filter(log2FoldChange < 0) %>%
+  drop_na() %>%
+  sample_n(100) %>%
+  mutate_if(is.numeric, function(x) { signif(x, digits = 3) }) %>%
+        datatable(caption = 'Log Fold Negativo')
 ```
+
+```{r ELI_NIT_table}
+
+```
+
+```{r SFI_ELI_table}
+
+```
+
+```{r}
+# TODO Terminar tablas
+```
+
+## Plots
+
+## Anotaciones
+
