@@ -1,6 +1,8 @@
 ---
-title: ""
+title: "PEC2 Análisis de datos ómicos"
+subtitle: 'Máster interuniversitario de Bioestadística y Bioinformática'
 date: "`r Sys.Date()`"
+author: 'Luis Morís Fernández'
 output:
   rmdformats::readthedown:
     highlight: kate
@@ -16,11 +18,17 @@ library(kableExtra)
 library(captioner)
 library(plotly)
 library(DT)
+library(magick)
 
 #Bio libraries
 library(GenomicAlignments)
 library(DESeq2)
 library(vsn)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(genefilter)
+library(clusterProfiler)
+library(pathview)
 
 #Captioner
 
@@ -30,7 +38,7 @@ out_nums <- captioner(prefix = 'Salida')
 
 ## Global options
 options(max.print = "75")
-opts_chunk$set(cache = TRUE,
+opts_chunk$set(cache = FALSE,
                prompt = FALSE,
                comment = NA,
                message = FALSE,
@@ -110,7 +118,7 @@ if (!file.exists(selected_data_file)) {
     column_to_rownames('rn')
 
   counts <- read_delim('../data/counts.csv', delim = ';') %>%
-    select(X1, rownames(targets)) %>%
+    dplyr::select(X1, rownames(targets)) %>%
     column_to_rownames('X1') %>%
     as.matrix()
 
@@ -124,7 +132,7 @@ table_nums(name = 'sample_group', caption = 'Muestras por grupo', display = F)
 `r table_nums('sample_group')`
 
 ```{r}
-targets %>% kable()
+targets %>% datatable()
 table_nums(name = 'sample_sel', caption = 'Muestras seleccionadas', display = F)
 ```
 
@@ -152,7 +160,7 @@ counts_long <- counts %>%
   as_tibble() %>%
   rownames_to_column(var = 'gene_id') %>%
   pivot_longer(-gene_id, names_to = 'Sample_Name', values_to = 'count') %>%
-  inner_join(select(targets, Sample_Name, Group), by = 'Sample_Name') %>%
+  inner_join(dplyr::select(targets, Sample_Name, Group), by = 'Sample_Name') %>%
   mutate(Group = factor(Group, levels = c('NIT', 'SFI', 'ELI'))) %>%
   arrange(Group)
 ```
@@ -221,7 +229,7 @@ targets <- bind_rows(targets, new_sample) %>%
 
 # Recreate counts
 counts <- read_delim('../data/counts.csv', delim = ';') %>%
-  select(X1, rownames(targets)) %>%
+  dplyr::select(X1, rownames(targets)) %>%
   column_to_rownames('X1') %>%
   as.matrix()
 
@@ -237,7 +245,7 @@ counts_long <- counts %>%
   as_tibble() %>%
   rownames_to_column(var = 'gene_id') %>%
   pivot_longer(-gene_id, names_to = 'Sample_Name', values_to = 'count') %>%
-  inner_join(select(targets, Sample_Name, Group), by = 'Sample_Name') %>%
+  inner_join(dplyr::select(targets, Sample_Name, Group), by = 'Sample_Name') %>%
   mutate(Group = factor(Group, levels = c('NIT', 'SFI', 'ELI'))) %>%
   arrange(Group)
 ```
@@ -283,7 +291,7 @@ Ahora las muestras parecen correctas.
 
 ## DSeqDataset
 
-Llegado a este punto vamos a transformar el set de datos un *DSeqDataset*. Antes de realizar este paso vamos a transformar los campos de interés para el análisis estadístico posterior en factores cuyo primer miembro será el nivel de referencia *NIT*.
+Llegado a este punto vamos a transformar el set de datos un *DSeqDataset*. Antes de realizar este paso vamos a transformar los campos de interés, solo Group en este caso, para el análisis estadístico posterior en factores cuyo primer miembro será el nivel de referencia *NIT*.
 
 ```{r to_dseq}
 targets[['Group']] <- factor(targets[['Group']], levels = c('NIT', 'SFI', 'ELI'))
@@ -292,7 +300,7 @@ dds <- DESeqDataSetFromMatrix(countData = counts, colData = targets, design = ~G
 
 ## Transformación
 
-Algunos de los métodos de exploración que vamos a utilizar funcionan mejor bajo condiciones de homocedasticidad, varianza igual. Sin embargo esto no es completamente cierto para nuestros datos ya que la varianza aumenta en función del conteo por gen, es decir los genes con mayor conteo tendrán mayor variabilidad.
+Algunos de los métodos de exploración que vamos a utilizar funcionan mejor bajo condiciones de homocedasticidad. Sin embargo esto no es completamente cierto para nuestros datos ya que la varianza aumenta en función del conteo por gen, es decir los genes con mayor conteo tendrán mayor variabilidad.
 
 Vamos a comprobarlo en nuestros datos
 
@@ -306,11 +314,12 @@ ggplot(counts_long %>%
   ylim(0, 2^10)
 
 ```
+
 *Nota*: El gráfico está cortado en su parte superior.
 
 Como vemos la variabilidad aumenta con la media.
 
-Vamos por tanto a transformar nuestros datos, como son pocas muestras utilizaremos * variance stabilizing transformation* o *vst*. Con la opción *blind* que evitará que en el computo de la transformación influya la varianza debida a las condiciones experimentales.
+Vamos por tanto a transformar nuestros datos, como son pocas muestras utilizaremos *variance stabilizing transformation* o *vst*. Con la opción *blind* que evitará que en el computo de la transformación influya la varianza debida a las condiciones experimentales.
 
 ```{r vst}
 vsd <- vst(dds, blind = F)
@@ -352,8 +361,9 @@ El agrupamiento es más fuerte entre las muestras del grupo *ELI* mientras que e
 ## PCA
 
 ```{r pca}
-plotPCA(vsd, intgroup = c('Group'))
+plotPCA(vsd, intgroup = 'Group')
 ```
+
 En el caso del PCA parece más prometedor, existe una diferencia clara entre condiciones en el eje X y además la cantidad de varianza explicada por ese factor es elevada, un 59%.
 
 ## MDS
@@ -367,6 +377,22 @@ ggplot(mds, aes(x = `1`, y = `2`, color = Group)) +
 ```
 Como en el caso de las distancias parece que el grupo *ELI* se diferencia claramente de los otros mientras que *SFI* y *NIT* se mezclan más.
 
+### Agrupamiento de genes
+
+Vamos a seleccionar los 20 genes más variables a través de las muestras de los datos transformados sobre *vst*
+
+```{r}
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+
+mat <- assay(vsd)[topVarGenes,]
+mat <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("Group", 'Group')])
+pheatmap(mat, annotation_col = anno)
+
+```
+
+El único cluster que parece asociado a las condiciones está en la esquina superior izquierda. Parece que contiene un set de genes asociados a la condición ELI. EL cluster central no parece particularmente asociado a ninguna condición.
+
 ## Conclusiones
 
 Parece que los datos son correctos y la exploración de los datos también indica que podemos proceder con el análisis de expresión diferencial.
@@ -374,9 +400,12 @@ Parece que los datos son correctos y la exploración de los datos también indic
 ```{r}
 
 ```
-# Análisis de expresión diferencial (DSeq)
 
-Como vamos a aplicar DSeq no es necesario aplicar ninguna tipo de transformación por lo tanto trabajaremos directemente sobre los conteos, en el objedto *DSeqDataset* que hemos creado en el apartado anterior.
+# Análisis de expresión diferencial (DSeq) y Anotación
+
+Como vamos a aplicar DSeq no es necesario aplicar ningún tipo de transformación por lo tanto trabajaremos directemente sobre los conteos, en el objeto *DSeqDataset* que hemos creado en el apartado anterior.
+
+Si quisiésemos por ejemplo trabajar con *limma* deberíamos de transformar los datos (*VOOM*) ya que no está preparada para conteos.
 
 En este caso disponemos de tres condiciones:
 
@@ -386,14 +415,9 @@ En este caso disponemos de tres condiciones:
 
 Vamos a aplicar varios enfoques en este caso:
 
-En primer lugar compararemos las dos condiciones experimentales (SFI y ELI) contra la condición control (NTI) y luego compararemos las condiciones experimentales entre ellas.
-
+Compararemos las dos condiciones experimentales (SFI y ELI) contra la condición control (NTI) y luego compararemos las condiciones experimentales entre ellas.
 
 En todo los casos utilizaremos como corte de significación p<.05 y en los casos de FDR un 5%. En otro caso se indicará explícitamente.
-
-## Análisis por pares
-
-Para el caso de las diferencias por pares utilizamos DESeq
 
 ```{r analysing, cache=TRUE}
 dds_pair_file <- 'dds_pair.RData'
@@ -409,16 +433,30 @@ Extraemos los resultados para cada contraste de interés y luego los plotearemos
 En el caso de los contrastes contra el nivel de referencia utilizaremos *apeglm* para el *shrinkage* y *ashr*, para el caso del ELI y SFI.
 
 ```{r results_pairwise, cache = T}
-
 rs_dds_pair_file <- 'rs_dds_pair.RData'
 if (!file.exists(rs_dds_pair_file)) {
-  rs_SFI_NIT <- results(dds_pair, name = 'Group_SFI_vs_NIT', alpha = .05)
-  rs_ELI_NIT <- results(dds_pair, name = 'Group_ELI_vs_NIT', alpha = .05)
-  rs_SFI_ELI <- results(dds_pair, contrast = c('Group', 'SFI', 'ELI'), alpha = .05)
 
-  rs_SFI_NIT_LFC <- lfcShrink(dds_pair, coef = 'Group_SFI_vs_NIT', type = 'apeglm')
-  rs_ELI_NIT_LFC <- lfcShrink(dds_pair, coef = 'Group_ELI_vs_NIT', type = 'apeglm')
-  rs_SFI_ELI_LFC <- lfcShrink(dds_pair, contrast = c('Group', 'SFI', 'ELI'), alpha = .05, type = 'ashr')
+  annot <- function(rs) {
+    rs$symbol <- mapIds(org.Hs.eg.db,
+                        keys = str_replace_all(rownames(rs), '\\..*', ''),
+                        column = "SYMBOL",
+                        keytype = "ENSEMBL",
+                        multiVals = "first")
+    rs$entrez <- mapIds(org.Hs.eg.db,
+                        keys = str_replace_all(rownames(rs), '\\..*', ''),
+                        column = "ENTREZID",
+                        keytype = "ENSEMBL",
+                        multiVals = "first")
+    return(rs)
+  }
+
+  rs_SFI_NIT <- annot(results(dds_pair, name = 'Group_SFI_vs_NIT', alpha = .05))
+  rs_ELI_NIT <- annot(results(dds_pair, name = 'Group_ELI_vs_NIT', alpha = .05))
+  rs_SFI_ELI <- annot(results(dds_pair, contrast = c('Group', 'SFI', 'ELI'), alpha = .05))
+
+  rs_SFI_NIT_LFC <- annot(lfcShrink(dds_pair, coef = 'Group_SFI_vs_NIT', type = 'apeglm'))
+  rs_ELI_NIT_LFC <- annot(lfcShrink(dds_pair, coef = 'Group_ELI_vs_NIT', type = 'apeglm'))
+  rs_SFI_ELI_LFC <- annot(lfcShrink(dds_pair, contrast = c('Group', 'SFI', 'ELI'), alpha = .05, type = 'ashr'))
 
   rs <- bind_rows(mutate(as_tibble(rs_SFI_NIT, rownames = 'gene'), contrast = 'Group_SFI_vs_NIT'),
                   mutate(as_tibble(rs_ELI_NIT, rownames = 'gene'), contrast = 'Group_ELI_vs_NIT'),
@@ -433,16 +471,111 @@ if (!file.exists(rs_dds_pair_file)) {
        file = rs_dds_pair_file) }else {
   load(rs_dds_pair_file)
 }
-
-#TODO Justificar Shrinkage
-
-#resultsNames(dds) # Obtain the names of the results comparisons
-#mcols(rs_SFI_NIT_LFC)
 ```
 
-Hemos calculado también los resultados con *log fold shrinkage* para observar como determinados genes con grandes cambios en el *log fold* van asociados a bajos conteos y alta variabilidad. *LFCShrink* penaliza estos genes reduciendo su *log fold*.
+Hemos calculado también los resultados con *log fold shrinkage* para observar como determinados genes con grandes cambios en el *log fold* van asociados a bajos conteos y alta variabilidad. *LFCShrink* penaliza estos genes reduciendo su *log fold*. Utilizaremos estos últimos para reportar los resultados. Además también hemos anotado todos los genes
 
-## Volcano plot
+# Resultados
+
+## Annotations
+
+Como hemos visto que hay muchos genes que no tienen anotación en *org.Hs.eg*, vamos primero a hacer un conteo rápido para saber cuantos genes mapeados tienen un correspondiente *Symbol* o *EntrezID*.
+
+```{r}
+rs_SFI_NIT %>%
+  as_tibble(rownames = 'gene_id') %>%
+  transmute('Symbol' = ifelse(is.na(rs_SFI_NIT[['symbol']]), 'Yes', 'No'),
+            'Symbol' = factor(Symbol, levels = c('Yes', 'No')),
+            'Entrez' = ifelse(is.na(rs_SFI_NIT[['entrez']]), 'Yes', 'No'),
+            'Entrez' = factor(Entrez, levels = c('Yes', 'No'))
+  ) %>%
+  janitor::tabyl(Symbol, Entrez) %>%
+  janitor::adorn_totals(where = c('row', 'col')) %>%
+  janitor::adorn_title()
+```
+Como vemos más de la mitad de los genes no tienen entrada por tanto su anotación será NA en las tablas.
+
+## Tablas de resultados
+
+Vamos a presentar los resultados en tablas que son ordenables y filtrables para cada uno de los contrastes por separado. Hemos eliminado las filas cuyos pvalores correspondían a *NA*. Los datos de cada contraste se dividen en Log Fold Positivo y Negativo.
+
+```{r result_table_function}
+
+table_report <- function(df) {
+  one_table <- function(df, fun) {
+    df %>%
+      as_tibble(rownames = 'gene_id') %>%
+      fun() %>%
+      arrange(padj) %>%
+      drop_na(-symbol, -entrez) %>%
+      sample_n(100) %>%
+      mutate_if(is.numeric, function(x) { signif(x, digits = 3) })
+  }
+
+  return(list(one_table(df, fun = function(x) { filter(x, log2FoldChange > 0) }),
+              one_table(df, fun = function(x) { filter(x, log2FoldChange < 0) })))
+
+}
+
+short_sum <- function(df, alpha = .05) {
+  df %>%
+    as_tibble(rownames = 'gene_id') %>%
+    transmute(Regulated = if_else(log2FoldChange > 0, 'Up', 'Down'),
+              Regulated = factor(Regulated, levels = c('Up', 'Down')),
+              Significant = if_else(!is.na(padj),
+                                    if_else(padj < alpha, 'Yes', 'No'),
+                                    'Low Count'),
+              Significant = factor(Significant, levels = c('Yes', 'No', 'Low Count'))
+    ) %>%
+    janitor::tabyl(Regulated, Significant) %>%
+    janitor::adorn_totals(where = c('row', 'col')) %>%
+    janitor::adorn_title()
+}
+
+print_datatable <- function(x, caption) { datatable(x %>% arrange(padj), filter = 'top', caption = caption) }
+
+```
+
+### Tabla SFI vs. NIT
+```{r SFI_NIT_table}
+short_sum(rs_SFI_NIT_LFC, .05) %>% kable()
+t <- table_report(rs_SFI_NIT_LFC)
+```
+```{r}
+print_datatable(t[[1]], caption = 'Log Fold Positivo')
+```
+```{r}
+print_datatable(t[[2]], caption = 'Log Fold Negativo')
+```
+
+### Tabla ELI vs. NIT
+```{r ELI_NIT_table}
+short_sum(rs_ELI_NIT_LFC, .05) %>% kable()
+t <- table_report(rs_ELI_NIT_LFC)
+```
+```{r}
+print_datatable(t[[1]], caption = 'Log Fold Positivo')
+```
+```{r}
+print_datatable(t[[2]], caption = 'Log Fold Negativo')
+```
+
+### Tabla SFI vs. ELI
+```{r SFI_ELI_table}
+short_sum(rs_SFI_ELI_LFC) %>% kable()
+t <- table_report(rs_SFI_ELI_LFC)
+```
+```{r}
+print_datatable(t[[1]], caption = 'Log Fold Positivo')
+```
+```{r}
+print_datatable(t[[2]], caption = 'Log Fold Negativo')
+```
+
+
+## Plots
+
+### Volcano plot
 ```{r plot_SIF_NIT, fig.width = 8, fig.height = 8, warning = F}
 
 cowplot::plot_grid(plotlist = my_volcano(df = rs, alpha = .05, lim_fold = 2, title = 'Sin LFC'), nrow = 2)
@@ -455,47 +588,464 @@ fig_nums(name = 'plot_SFI_NIT', caption = 'Volcano SFI vs. NTI con y sin LFC', d
 La línea horizontal indica el límite de significación para un 5%, las líneas verticales un fold de 2, los colores indican si un gen ha resultado significativo o no.
 
 Como vemos en el caso sin *shrinkage* aparecen multitud de genes con un fold muy elevado, sin embargo al aplicar *LFC* el número se reduce drásticamente, probablemente sea indicativo de abundantes genes con variabilidad elevada. La única comparación que no sale fuertemente penalizada es *SFI vs. ELI*.
+En la sección anterior hemos visto los volcano plots que hemos utilizado en primer lugar para comparar la diferencia entre los resultados cuando utilizamos un *shrinkage* y cuando no lo utilizamos. Por tanto no los repetiremos aquí
 
-Dada esta diferencia utilizaremos la tabla con *shrinkage* para intepretar los resultados.
+### MA-Plot
 
+Hemos ploteado para todos los contrastes tanto los resultados sin como con *shrinkage*. En el caso que no hemos un *shrinkage* podemos comprobar como la estimación del log fold es más variable con conteos bajos (logFold altos pero sin embargo no son significativos) y sin embargo se vuelve menos variable cuando aumenta el conteo. Una consecuencia de esto es que logFold de una determinada magnitud no son significativos si el conteo es bajo y sin embargo si lo son con conteos alto. En rojo aparecen coloreados los resultados significativos.
+Vemos también como la transformación *vst* es efectiva ya que reduce el logFold en los conteos bajos, con lo que en esa franja de los gráficos se concentran en cero.
 
-## Tablas de resultados
-
-Vamos a presentar los resultados en tablas que son ordenables y filtrables para cada uno de los contrastes por separado. Hemos eliminado las columnas *NA* de los resultados. Los datos de cada contraste se dividen en Log Fold Positivo y Negativo.
-
-### Tabla SFI vs. NIT
-
-```{r SFI_NIT_table}
-rs_SFI_NIT_LFC %>%
-  as_tibble(rownames = 'gene_id') %>%
-  filter(log2FoldChange > 0) %>%
-  drop_na() %>%
-  sample_n(100) %>%
-  mutate_if(is.numeric, function(x) { signif(x, digits = 3) }) %>%
-  datatable(caption = 'Log Fold Positivo')
-
-rs_SFI_NIT_LFC %>%
-  as_tibble(rownames = 'gene_id') %>%
-  filter(log2FoldChange < 0) %>%
-  drop_na() %>%
-  sample_n(100) %>%
-  mutate_if(is.numeric, function(x) { signif(x, digits = 3) }) %>%
-        datatable(caption = 'Log Fold Negativo')
+#### SFI vs. NIT
+```{r}
+plotMA(rs_SFI_NIT, ylim = c(-5, 5))
+plotMA(rs_SFI_NIT_LFC, ylim = c(-5, 5))
 ```
 
-```{r ELI_NIT_table}
+#### ELI vs. NIT
+```{r}
+plotMA(rs_ELI_NIT, ylim = c(-5, 5))
+plotMA(rs_ELI_NIT_LFC, ylim = c(-5, 5))
+```
+
+#### SFI vs. ELI
+```{r}
+plotMA(rs_SFI_ELI, ylim = c(-5, 5))
+plotMA(rs_SFI_ELI_LFC, ylim = c(-5, 5))
+```
+
+# Análisis de enriquecimiento
+
+- Hemos utilizado el paquete clusterProfiler
+  - Para estos análisis hemos seleccionado todos aquellos genes cuyo p-valor corregido con FDR es menor a .1
+  - Hemos realizado un análisis por contraste
+  - Hemos utilizado las bases de datos KEGG y GO
+  - En el caso de KEGG hemos corregido siempre con un p<.05 y un q<.05 para ORA y p<.05 para GSEA
+  - En el caso de GO hemos corregido siempre con un p<.05 y un q<.05, y p<.05 para GSEA.
+  - Hemos realizado 10000 permutaciones en los GSE
+
+  Enlaces a los tipos de gráficos utilizados:
+
+  - [heatplot](https://yulab-smu.github.io/clusterProfiler-book/chapter12.html#heatmap-like-functional-classification)
+  - [dotplot](https://yulab-smu.github.io/clusterProfiler-book/chapter12.html#dot-plot)
+  - [goplot](https://yulab-smu.github.io/clusterProfiler-book/chapter12.html#goplot)
+  - [emapplot](https://yulab-smu.github.io/clusterProfiler-book/chapter12.html#enrichment-map)
+  - [ridgeplot](https://yulab-smu.github.io/clusterProfiler-book/chapter12.html#ridgeline-plot-for-expression-distribution-of-gsea-result)
+
+En este sección utilizaremos dos tipos de análisis sobre dos bases de datos diferentes:
+
+  - Overrepresentation y Gene Set Enrichment Analysis
+  - Gene Ontology [GO](http://geneontology.org/docs/go-enrichment-analysis/) y Kyoto Encyclopedia of Genes and Genomes, [KEGG](https://www.genome.jp/kegg/)
+
+## Interpretación de los resultados
+
+Para los resultados de cada uno de estos análisis presentamos el mismo conjunto de tablas y resultados. Una tabla que muestra los resultados obtenidos, con información relevante sobre cada uno de ellos y un enlace a cada uno de los elementos de la GO o KEGG encontrados. Los tipos de gráficos varían según el tipo de análisis.
+
+En el caso de KEGG cuando una ruta resulta significativa, el diagrama de la ruta se descarga y se colorea dependiendo de la expresión de los genes incluidos en la ruta para el análisis.
+
+
+```{r enrichment}
+
+enrich_set <- rs_LFC %>%
+  drop_na() %>%
+  dplyr::select(p.fdr = padj, ENTREZID = entrez, fold = log2FoldChange, contrast) %>%
+  filter(p.fdr < .05)
+
+to_entrezid <- function(df) {
+  df %>% dplyr::pull(ENTREZID)
+}
+
+to_fold <- function(df) {
+  sort(tibble::deframe(df %>% dplyr::select(ENTREZID, fold)), decreasing = T)
+}
+
+enrich_kegg <- function(cont, gene_list, pvaluecutoff = .05, qvaluecutoff = .05) {
+  gene_list_contrast <- to_entrezid(gene_list %>% dplyr::filter(contrast == cont))
+  gene_list_kegg <- bitr_kegg(gene_list_contrast,
+                              fromType = 'ncbi-geneid',
+                              toType = 'kegg', organism = 'hsa')$kegg
+  enrich_res <- enrichKEGG(gene_list_kegg,
+                           organism = 'hsa',
+                           pvalueCutoff = pvaluecutoff,
+                           keyType = 'kegg',
+                           qvalueCutoff = qvaluecutoff)
+  # Ok con el ncbi-geneid! https://www.genome.jp/dbget-bin/www_bget?dme:Dmel_CG14941 Ejemplo
+  return(enrich_res)
+}
+
+cont <- 'Group_SFI_vs_NIT'
+gene_list <- enrich_set
+
+gse_kegg <- function(cont, gene_list, pvaluecutoff = .05, n_perm = 10000) {
+  gene_list_contrast <- to_fold(gene_list %>% dplyr::filter(contrast == cont))
+  names(gene_list_contrast) <- bitr_kegg(names(gene_list_contrast),
+                                         fromType = 'ncbi-geneid',
+                                         toType = 'kegg', organism = 'hsa')$kegg
+  enrich_res <- tryCatch({ gseKEGG(gene_list_contrast,
+                                   organism = 'hsa',
+                                   pvalueCutoff = pvaluecutoff,
+                                   nPerm = n_perm,
+                                   keyType = 'kegg') },
+                         error = function(cond) { tibble(ID = character(),
+                                                         Description = character(),
+                                                         SetSize = numeric(),
+                                                         enrichmentScore  =numeric(),
+                                                         NES = numeric(),
+                                                         pvalue = numeric(),
+                                                         p.adjsut=numeric(),
+                                                         qvalues=numeric(),
+                                                         rank=numeric(),
+                                                         leading_edge=character()
+                         ) })
+  # Ok con el ncbi-geneid! https://www.genome.jp/dbget-bin/www_bget?dme:Dmel_CG14941 Ejemplo
+  return(enrich_res)
+}
+
+enrich_go <- function(cont, gene_list, pvaluecutoff = .05, qvaluecutoff = .05) {
+  gene_list_contrast <- to_entrezid(gene_list %>% dplyr::filter(contrast == cont))
+  enrich_res <- enrichGO(gene = gene_list_contrast,
+                         OrgDb = org.Hs.eg.db,
+                         keyType = 'ENTREZID',
+                         ont = "CC",
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = pvaluecutoff,
+                         qvalueCutoff = qvaluecutoff)
+  enrich_res <- setReadable(enrich_res, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+  return(enrich_res)
+}
+
+cont <- 'Group_SFI_vs_NIT'
+
+gse_go <- function(cont, gene_list, n_perm = 10000, pvaluecutoff = 0.05) {
+  gene_list_contrast <- to_fold(gene_list %>% dplyr::filter(contrast == cont))
+  enrich_res <- tryCatch({ gseGO(geneList = gene_list_contrast,
+                                 OrgDb = org.Hs.eg.db,
+                                 keyType = 'ENTREZID',
+                                 ont = "CC",
+                                 nPerm = n_perm,
+                                 minGSSize = 100,
+                                 maxGSSize = 500,
+                                 pvalueCutoff = pvaluecutoff,
+                                 verbose = FALSE) },
+                         error = function(cond) { tibble(ID=character(),
+                                                         Description=character(),
+                                                         GeneRatio=character(),
+                                                         BgRatio=character(),
+                                                         pvalue=numeric(),
+                                                         p.adjust=numeric(),
+                                                         q.value=numeric(),
+                                                         Count=numeric())}
+  )
+  if (nrow(enrich_res) > 0) {
+    enrich_res <- setReadable(enrich_res, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+  }
+  return(enrich_res)
+}
 
 ```
 
-```{r SFI_ELI_table}
+```{r plot_enrichment functions}
+plot_enrich_ORA <- function(enrich_df, contrast, type) {
+  if (nrow(enrich_df) == 0) {
+    return(invisible(NA))
+  }
+  p1 <- heatplot(enrich_df) + labs(title = paste(contrast))
+  p2 <- dotplot(enrich_df)
 
+  plot(p1)
+  plot(p2)
+
+  if (type == 'GO' && nrow(enrich_go_SFI) > 1) {
+    p3 <- goplot(enrich_df)
+    plot(p3)
+    # cowplot::plot_grid(p1,p2,p3, labels = 'AUTO', nrow = 3)
+  }
+}
+
+plot_enrich_GSE <- function(enrich_df, contrast, type) {
+  if (nrow(enrich_df) == 0) {
+    return(invisible(NA))
+  }
+
+  if (type == 'GO') {
+    p1 <- emapplot(enrich_df) + labs(title = paste(contrast))
+  }else {
+    p1 <- ridgeplot(enrich_df) + labs(title = paste(contrast))
+  }
+  p2 <- dotplot(enrich_df) + labs(title = paste(contrast))
+  # cowplot::plot_grid(p1, p2, labels = 'AUTO', nrow=2)
+  plot(p1)
+  plot(p2)
+}
+
+enrich_go_table <- function(enrich_go) {
+  suppressWarnings(enrich_go %>%
+                     tibble::as_tibble() %>%
+                     dplyr::mutate(ID = glue::glue("<a href='http://amigo.geneontology.org/amigo/term/{ID}' target='_blank'>{ID}</a>", ID = ID)) %>%
+                     dplyr::mutate_if(is.numeric, signif, digits = 2) %>%
+                     dplyr::select(-one_of("geneID", "core_enrichment")) %>%
+                     DT::datatable(escape = FALSE))
+}
+
+
+enrich_kegg_table <- function(enrich_kegg) {
+
+  if (nrow(enrich_kegg) != 0) {
+
+    enrich_kegg_tibble <- enrich_kegg %>% tibble::as_tibble()
+
+    gen_url <- function(x, pathID) { paste0("http://www.kegg.jp/kegg-bin/show_pathway?",
+                                            pathID, "/", x[pathID, "geneID"]) }
+
+    suppressWarnings(enrich_kegg_tibble %>%
+                       dplyr::mutate(Link = lapply(ID, function(x) { stringr::str_sub(gen_url(x = enrich_kegg, pathID = x), 1, -2) }),
+                                     Description = paste0("<a href='", Link, "' target='_blank'>", Description, "</a>")) %>%
+                       dplyr::mutate_if(is.numeric, signif, digits = 2) %>%
+                       dplyr::select(-Link, -one_of("geneID", "core_enrichment")) %>%
+                       DT::datatable(escape = FALSE)) }else
+    { tibble() %>% DT::datatable(escape = FALSE) }
+}
+
+enrich_kegg_pathview <- function(enrich_kegg, gene_list, dir_path = './kegg_pathview') {
+
+  enrich_kegg_tibble <- enrich_kegg %>% tibble::as_tibble()
+
+  if (nrow(enrich_kegg_tibble) == 0) { return(invisible(NULL)) }
+
+  dev.null <- lapply(enrich_kegg_tibble$ID, function(x) { if (!file.exists(file.path(dir_path, paste0(x, '.xml')))) {
+    pathview(gene.data = to_fold(gene_list),
+             pathway.id = x,
+             species = 'hsa',
+             kegg.dir = dir_path
+    )
+    file.copy(from = paste0(x, ".pathview.png"),
+              to = file.path(dir_path, paste0(x, ".pathview.png")))
+    file.remove(paste0(x, ".pathview.png"))
+
+  } })
+
+  dev.null <- lapply(enrich_kegg_tibble$ID, function(x) { plot(cowplot::ggdraw() + cowplot::draw_image(image_trim(image_read(file.path(dir_path, paste0(x, ".pathview.png")))))) })
+
+}
+
+```
+
+## Gene ontology
+
+### Over-representation analysis
+
+```{r}
+enrich_go_SFI <- suppressMessages(suppressWarnings(enrich_go('Group_SFI_vs_NIT', enrich_set)))
+enrich_go_ELI <- suppressMessages(suppressWarnings(enrich_go('Group_ELI_vs_NIT', enrich_set)))
+enrich_go_SFI_ELI <- suppressMessages(suppressWarnings(enrich_go('Group_SFI_vs_ELI', enrich_set)))
+```
+
+#### SFI vs. NIT
+
+```{r}
+enrich_go_table(enrich_go_SFI)
+```
+```{r}
+plot_enrich_ORA(enrich_go_SFI, 'Group_SFI_vs_NIT', type = 'GO')
+```
+#### ELI vs. NIT
+
+```{r}
+enrich_go_table(enrich_go_ELI)
 ```
 
 ```{r}
-# TODO Terminar tablas
+plot_enrich_ORA(enrich_go_ELI, 'Group_ELI_vs_NIT', type = 'GO')
 ```
 
-## Plots
+#### SFI vs. ELI
 
-## Anotaciones
+```{r}
+enrich_go_table(enrich_go_SFI_ELI)
+```
 
+```{r}
+plot_enrich_ORA(enrich_go_SFI_ELI, 'Group_SFI_vs_ELI', type = 'GO')
+```
+
+
+### Gene Set enrichment analysis
+
+```{r compute_go_GSE}
+gse_go_SFI_ELI <- suppressMessages(suppressWarnings(gse_go('Group_SIF_vs_ELI', enrich_set)))
+gse_go_ELI <- suppressMessages(suppressWarnings(gse_go('Group_ELI_vs_NIT', enrich_set)))
+gse_go_SFI <- suppressMessages(suppressWarnings(gse_go('Group_SFI_vs_NIT', enrich_set)))
+```
+
+```{r show_go_table_GSE, include=FALSE}
+tibble::tibble(Contrast = c('Group_SIF_vs_NIT', 'Group_ELI_vs_NIT', 'Group_SFI_vs_ELI'),
+               'Rutas sobrerrepresentadas' = c(nrow(gse_go_SFI), nrow(gse_go_ELI), nrow(gse_go_SFI_ELI))) %>%
+  kableExtra::kable() %>%
+  kableExtra::kable_styling(full_width = F)
+```
+
+#### SFI vs. NIT
+
+```{r show_go_GSE_table_SFI}
+enrich_go_table(gse_go_SFI)
+```
+
+```{r show_go_GSE_SFI, fig.fullwidth = TRUE, out.width='100%', out.height='100%', fig.cap="Resultados de GSE para GO",fig.fullwidth = TRUE}
+plot_enrich_GSE(gse_go_SFI, 'Group_SFI_vs_NIT', type = 'GO')
+```
+
+#### ELI vs. NIT
+
+```{r show_go_GSE_table_res}
+enrich_go_table(gse_go_ELI)
+```
+
+```{r show_go_GSE_res, fig.fullwidth = TRUE, out.width='100%', out.height='100%', fig.cap="Resultados de GSE para GO",fig.fullwidth = TRUE}
+plot_enrich_GSE(gse_go_ELI, 'Group_ELI_vs_NIT', type = 'GO')
+```
+
+#### SFI vs. ELI
+
+```{r show_go_GSE_table_SFI_ELI}
+enrich_go_table(gse_go_SFI_ELI)
+```
+
+```{r show_go_GSE_SFI_ELI, fig.fullwidth = TRUE, out.width='100%', out.height='100%', fig.cap="Resultados de GSE para GO",fig.fullwidth = TRUE}
+plot_enrich_GSE(gse_go_SFI_ELI, 'Group_SFI_vs_ELI', type = 'GO')
+```
+
+## KEGG
+
+### Over-representation analysis
+
+```{r}
+enrich_kegg_SFI <- suppressMessages(suppressWarnings(enrich_kegg('Group_SFI_vs_NIT', enrich_set)))
+enrich_kegg_ELI <- suppressMessages(suppressWarnings(enrich_kegg('Group_ELI_vs_NIT', enrich_set)))
+enrich_kegg_SFI_ELI <- suppressMessages(suppressWarnings(enrich_kegg('Group_SFI_vs_ELI', enrich_set)))
+```
+
+#### SFI vs. NIT AQUI NO HAY NADA!
+
+```{r}
+enrich_kegg_table(enrich_kegg_SFI)
+```
+<details>
+  <summary><h4>Haga click para ver los pathways</h4></summary>
+
+```{r}
+enrich_kegg_pathview(enrich_kegg_SFI, enrich_set)
+```
+
+</details>
+
+```{r}
+plot_enrich_ORA(enrich_kegg_SFI, 'Group_SFI_vs_NIT', type = 'KEGG')
+```
+#### ELI vs. NIT
+
+```{r}
+enrich_kegg_table(enrich_kegg_ELI)
+```
+<details>
+  <summary><h4>Haga click para ver los pathways</h4></summary>
+
+```{r}
+enrich_kegg_pathview(enrich_kegg_ELI, enrich_set)
+```
+</details>
+
+```{r}
+plot_enrich_ORA(enrich_kegg_ELI, 'Group_ELI_vs_NIT', type = 'KEGG')
+```
+
+#### SFI vs. ELI
+
+```{r}
+enrich_kegg_table(enrich_kegg_SFI_ELI)
+```
+
+<details>
+  <summary><h4>Haga click para ver los pathways</h4></summary>
+
+```{r}
+enrich_kegg_pathview(enrich_kegg_SFI_ELI, enrich_set)
+```
+
+</details>
+
+```{r}
+plot_enrich_ORA(enrich_kegg_SFI_ELI, 'Group_SFI_vs_ELI', type = 'KEGG')
+```
+
+
+### Gene Set enrichment analysis
+
+```{r compute_kegg_GSE}
+gse_kegg_SFI_ELI <- suppressMessages(suppressWarnings(gse_kegg('Group_SIF_vs_ELI', enrich_set)))
+gse_kegg_ELI <- suppressMessages(suppressWarnings(gse_kegg('Group_ELI_vs_NIT', enrich_set)))
+gse_kegg_SFI <- suppressMessages(suppressWarnings(gse_kegg('Group_SFI_vs_NIT', enrich_set)))
+```
+
+```{r show_kegg_table_GSE, include=FALSE}
+tibble::tibble(Contrast = c('Group_SIF_vs_NIT', 'Group_ELI_vs_NIT', 'Group_SFI_vs_ELI'),
+               'Rutas sobrerrepresentadas' = c(nrow(gse_kegg_SFI), nrow(gse_kegg_ELI), nrow(gse_kegg_SFI_ELI))) %>%
+  kableExtra::kable() %>%
+  kableExtra::kable_styling(full_width = F)
+```
+
+#### SFI vs. NIT
+
+```{r show_kegg_GSE_table_SFI}
+enrich_kegg_table(gse_kegg_SFI)
+```
+
+<details>
+  <summary><h4>Haga click para ver los pathways</h4></summary>
+
+```{r}
+enrich_kegg_pathview(gse_kegg_SFI, enrich_set)
+```
+
+</details>
+
+```{r show_kegg_GSE_SFI, fig.fullwidth = TRUE, out.width='100%', out.height='100%', fig.cap="Resultados de GSE para KEGG",fig.fullwidth = TRUE}
+plot_enrich_GSE(gse_kegg_SFI, 'Group_SFI_vs_NIT', type = 'KEGG')
+```
+
+#### ELI vs. NIT
+
+```{r show_kegg_GSE_table_res}
+enrich_kegg_table(gse_kegg_ELI)
+```
+
+
+<details>
+  <summary><h4>Haga click para ver los pathways</h4></summary>
+
+```{r}
+enrich_kegg_pathview(gse_kegg_ELI, enrich_set)
+```
+
+</details>
+
+```{r show_kegg_GSE_res, fig.fullwidth = TRUE, out.width='100%', out.height='100%', fig.cap="Resultados de GSE para KEGG",fig.fullwidth = TRUE}
+plot_enrich_GSE(gse_kegg_ELI, 'Group_ELI_vs_NIT', type = 'KEGG')
+```
+
+#### SFI vs. ELI
+
+```{r show_kegg_GSE_table_SFI_ELI}
+enrich_kegg_table(gse_kegg_SFI_ELI)
+```
+
+<details>
+  <summary><h4>Haga click para ver los pathways</h4></summary>
+
+```{r}
+enrich_kegg_pathview(gse_kegg_SFI_ELI, enrich_set)
+```
+
+</details>
+
+```{r show_kegg_GSE_SFI_ELI, fig.fullwidth = TRUE, out.width='100%', out.height='100%', fig.cap="Resultados de GSE para KEGG",fig.fullwidth = TRUE}
+plot_enrich_GSE(gse_kegg_SFI_ELI, 'Group_SFI_vs_ELI', type = 'KEGG')
+```
