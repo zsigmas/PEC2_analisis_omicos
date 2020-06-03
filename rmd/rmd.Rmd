@@ -58,7 +58,7 @@ if (interactive()) {
 lmft <- ggthemes::theme_tufte(base_family = 'sans', base_size = 14)
 
 ```
-
+[`r icon::fa_github()` Repositorio de código](https://github.com/zsigmas/PEC2_analisis_omicos)
 
 # Información general sobre los datos
 
@@ -1013,6 +1013,8 @@ plot_enrich_GSE(gse_go_SFI_ELI, 'Group_SFI_vs_ELI', type = 'GO')
 
 ## KEGG
 
+En el caso de KEGG se han ocultado los pathways yo que en algunos casos son demasiados y hacen dificil navegar el documento. Se pueden desplegar en cada sección haciendo click en los puntos indicados.
+
 ### Over-representation analysis
 
 ```{r}
@@ -1183,8 +1185,6 @@ No parece que la separación sea completamente perfecta, pero si parece que hay 
 
 # Archivos generados
 
-[`r icon::fa_github()` Repositorio de código](https://github.com/zsigmas/PEC2_analisis_omicos)
-
 Los archivos aparecen comprimidos en el repositorio en formato zip.
 
 ```{r}
@@ -1192,7 +1192,7 @@ save_dose_result = function(enrich_df, fname){
   enrich_df %>% tibble::as_tibble() %>% readr::write_csv(x = ., path = paste0(fname,'.csv'))
 }
 
-if(!file.exists('results.zip')){
+if(!file.exists('../results.zip')){
 
   # Tables
   rs_SFI_NIT %>% as_tibble(rownames = 'gene_id') %>% write_csv('../results/results_SFI_NIT.csv')
@@ -1220,14 +1220,13 @@ if(!file.exists('results.zip')){
   gse_kegg_ELI %>% save_dose_result(fname='../results/gse_kegg_ELI')
   gse_kegg_SFI_ELI %>% save_dose_result(fname='../results/gse_kegg_SFI_ELI')
 
-  zip::zipr(files='../results',zipfile = 'results.zip')
+  zip::zipr(files='../results',zipfile = '../results.zip')
 }
 
 ```
 
 |Nombre|
 |-------------|
-
 |results_SFI_NIT.csv|
 |results_ELI_NIT.csv|
 |results_SFI_ELI.csv|
@@ -1254,16 +1253,3 @@ if(!file.exists('results.zip')){
 # Apéndice de código
 
 Todo el código generado aparece en el markdown y se puede consultar o ocultar
-
-# Referencias a los paquetes
-
-```{r}
-pack_list <- c('knitr','rmdformats','tidyverse','kableExtra','captioner','plotly','DT','magick','GenomicAlignments','GenomicFeatures',
-  'GenomicRanges','DESeq2','vsn','AnnotationDbi','genefilter','clusterProfiler','pathview','EnsDb.Hsapiens.v75','Gviz')
-
-bib_list = unlist(lapply(pack_list, function(x){toBibtex(citation(x))}))
-
-bib_list_2 = unlist(lapply(1:length(bib_list), function(x){stringr::str_replace(bib_list[[x]],pattern='\\{,',replacement=paste0('\\{',x,','))}))
-
-writeLines(bib_list_2, 'references.bib')
-```
