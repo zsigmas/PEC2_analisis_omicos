@@ -3,3 +3,13 @@
 
 data/
 /rmd/rmd_cache/
+
+rmd/kegg_pathview/
+
+rmd/dds_pair\.RData
+
+rmd/rs_dds_pair\.RData
+
+rmd/rmd_files/figure-html/
+
+results/
